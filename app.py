@@ -1,32 +1,17 @@
 """
-Previsor de Situação do Aluno (v2)
------------------------------------
-Modelo de árvore de decisão + interface Gradio (Blocks) interativa e animada.
+Previsor de Situação do Aluno (v2 - Streamlit)
+-----------------------------------------------
+Modelo de árvore de decisão + interface Streamlit interativa.
 
-O QUE MUDOU NESTA VERSÃO (correção do bug relatado: tudo em 0 previa "Aprovado")
----------------------------------------------------------------------------
-Causa raiz: o dataset original tinha só 5 linhas. Com tão poucos exemplos, a
-árvore "aprendeu" uma regra tosca (ex.: "se Faltas <= 4 então Aprovado") sem
-nunca considerar a Nota nesse ramo — por isso 0 faltas, 0 horas e 0 de nota
-caía em "Aprovado". Não era mais um erro de sintaxe, era falta de dado
-representativo por trás da lógica.
+Convertido da versão original em Gradio (Blocks) mantendo:
+- Dataset sintético de 400 alunos gerado por regra de negócio explícita
+- Camada de segurança lógica (regra de bom senso) além da árvore
+- Árvore de decisão colorida no tema escuro
+- Cards de resultado com barras de probabilidade animadas
+- Exemplos rápidos (equivalente ao gr.Examples)
 
-Correções:
-1. Dataset sintético com 400 alunos, gerado a partir de uma REGRA DE NEGÓCIO
-   explícita (ver `definir_situacao`): Nota e Faltas determinam a situação;
-   Horas de estudo influencia a Nota (correlação realista), mas não decide
-   sozinha o resultado.
-2. Camada de segurança lógica (`_regra_bom_senso`): além da árvore, casos
-   extremos e óbvios (nota muito baixa, excesso de faltas, nota altíssima
-   com poucas faltas) são verificados por uma regra determinística. Se a
-   árvore discordar da regra nesses casos claros, a regra prevalece e a
-   interface avisa que o resultado foi ajustado por consistência.
-3. `y` como Series (não DataFrame), split estratificado, árvore com
-   max_depth para não overfitar no ruído.
-4. Cores revisadas: mesma paleta (verde/âmbar/vermelho) usada nos cards, nas
-   barras de probabilidade e nos nós da árvore (recoloridos manualmente).
-   Tema forçado para claro, já que o Gradio estava herdando o modo escuro
-   do sistema operacional do usuário.
+Para rodar:
+    streamlit run app.py
 """
 
 import matplotlib
@@ -34,11 +19,13 @@ import matplotlib.pyplot as plt
 import matplotlib.text
 import numpy as np
 import pandas as pd
-import gradio as gr
+import streamlit as st
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 
 matplotlib.use("Agg")
+
+st.set_page_config(page_title="Previsor de Situação do Aluno", page_icon="🎓", layout="wide")
 
 # ---------------------------------------------------------------------------
 # 1) Regra de negócio que define a situação "de verdade"
@@ -59,54 +46,6 @@ def definir_situacao(nota_aluno: float, faltas_aluno: float) -> str:
     return "Reprovado"
 
 
-# ---------------------------------------------------------------------------
-# 2) Dataset sintético (realista): horas influencia nota, nota+faltas
-#    determinam a situação pela regra acima.
-# ---------------------------------------------------------------------------
-rng = np.random.default_rng(7)
-N_AMOSTRAS = 400
-
-horas = rng.uniform(0, 20, N_AMOSTRAS)
-faltas = rng.uniform(0, 30, N_AMOSTRAS)
-ruido = rng.normal(0, 0.9, N_AMOSTRAS)
-nota = np.clip(3.6 + 0.30 * horas - 0.06 * faltas + ruido, 0, 10)
-
-situacao = [definir_situacao(n, f) for n, f in zip(nota, faltas)]
-
-df = pd.DataFrame(
-    {
-        "Horas_de_estudo": np.round(horas, 1),
-        "Faltas": np.round(faltas).astype(int),
-        "Nota": np.round(nota, 1),
-        "Situacao": situacao,
-    }
-)
-
-# ---------------------------------------------------------------------------
-# 3) Treino do modelo
-# ---------------------------------------------------------------------------
-x = df[["Horas_de_estudo", "Faltas", "Nota"]]
-y = df["Situacao"]  # Series (1D), não DataFrame
-
-x_train, x_teste, y_train, y_teste = train_test_split(
-    x, y, test_size=0.2, random_state=42, stratify=y
-)
-
-modelo = DecisionTreeClassifier(random_state=42, max_depth=6)
-modelo.fit(x_train, y_train)
-ACURACIA_TESTE = modelo.score(x_teste, y_teste)
-
-CLASSES = list(modelo.classes_)
-
-# Paleta única usada em todo lugar (cards, barras, árvore)
-CORES = {
-    "Aprovado": "#16a34a",
-    "Recuperação": "#d97706",
-    "Reprovado": "#dc2626",
-}
-EMOJI = {"Aprovado": "🎉", "Recuperação": "📘", "Reprovado": "📕"}
-
-
 def _regra_bom_senso(nota_aluno: float, faltas_aluno: float):
     """Rede de segurança: só se manifesta em casos extremos e inequívocos.
     Retorna None quando o caso é de fronteira (aí confia-se no modelo)."""
@@ -119,17 +58,66 @@ def _regra_bom_senso(nota_aluno: float, faltas_aluno: float):
     return None
 
 
+# Paleta única usada em todo lugar (cards, barras, árvore)
+CORES = {
+    "Aprovado": "#16a34a",
+    "Recuperação": "#d97706",
+    "Reprovado": "#dc2626",
+}
+EMOJI = {"Aprovado": "🎉", "Recuperação": "📘", "Reprovado": "📕"}
 FUNDO_ARVORE = "#0b1020"
 
 
-def gerar_imagem_arvore() -> str:
+# ---------------------------------------------------------------------------
+# 2) Dataset sintético + treino do modelo (cacheado - só roda uma vez)
+# ---------------------------------------------------------------------------
+@st.cache_resource
+def treinar_modelo():
+    rng = np.random.default_rng(7)
+    n_amostras = 400
+
+    horas = rng.uniform(0, 20, n_amostras)
+    faltas = rng.uniform(0, 30, n_amostras)
+    ruido = rng.normal(0, 0.9, n_amostras)
+    nota = np.clip(3.6 + 0.30 * horas - 0.06 * faltas + ruido, 0, 10)
+
+    situacao = [definir_situacao(n, f) for n, f in zip(nota, faltas)]
+
+    df = pd.DataFrame(
+        {
+            "Horas_de_estudo": np.round(horas, 1),
+            "Faltas": np.round(faltas).astype(int),
+            "Nota": np.round(nota, 1),
+            "Situacao": situacao,
+        }
+    )
+
+    x = df[["Horas_de_estudo", "Faltas", "Nota"]]
+    y = df["Situacao"]  # Series (1D), não DataFrame
+
+    x_train, x_teste, y_train, y_teste = train_test_split(
+        x, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    modelo = DecisionTreeClassifier(random_state=42, max_depth=6)
+    modelo.fit(x_train, y_train)
+    acuracia_teste = modelo.score(x_teste, y_teste)
+
+    return modelo, list(x.columns), list(modelo.classes_), acuracia_teste, n_amostras
+
+
+modelo, FEATURE_NAMES, CLASSES, ACURACIA_TESTE, N_AMOSTRAS = treinar_modelo()
+
+
+@st.cache_resource
+def gerar_imagem_arvore(_modelo, feature_names, classes):
     fig, ax = plt.subplots(figsize=(12, 6.5))
     fig.patch.set_facecolor(FUNDO_ARVORE)
     ax.set_facecolor(FUNDO_ARVORE)
     plot_tree(
-        modelo,
-        feature_names=list(x.columns),
-        class_names=CLASSES,
+        _modelo,
+        feature_names=feature_names,
+        class_names=classes,
         filled=True,
         rounded=True,
         fontsize=8,
@@ -153,26 +141,16 @@ def gerar_imagem_arvore() -> str:
             if artist.arrow_patch is not None:
                 artist.arrow_patch.set_color("#64748b")
     fig.tight_layout()
-    caminho = "arvore_decisao.png"
-    fig.savefig(caminho, dpi=150, facecolor=FUNDO_ARVORE)
-    plt.close(fig)
-    return caminho
+    return fig
 
 
-IMG_ARVORE = gerar_imagem_arvore()
+FIG_ARVORE = gerar_imagem_arvore(modelo, FEATURE_NAMES, CLASSES)
 
 
 # ---------------------------------------------------------------------------
-# 4) Função de previsão (modelo + validação + rede de segurança lógica)
+# 3) Função de previsão (modelo + validação + rede de segurança lógica)
 # ---------------------------------------------------------------------------
 def prever_situacao(horas_in, faltas_in, nota_in):
-    if horas_in is None or faltas_in is None or nota_in is None:
-        raise gr.Error("Preencha os três campos antes de prever.")
-    if horas_in < 0 or faltas_in < 0:
-        raise gr.Error("Horas de estudo e faltas não podem ser negativas.")
-    if not (0 <= nota_in <= 10):
-        raise gr.Error("A nota deve estar entre 0 e 10.")
-
     df_novo = pd.DataFrame(
         [[horas_in, faltas_in, nota_in]],
         columns=["Horas_de_estudo", "Faltas", "Nota"],
@@ -221,11 +199,10 @@ def prever_situacao(horas_in, faltas_in, nota_in):
 
 
 # ---------------------------------------------------------------------------
-# 5) CSS — tema claro forçado + animações + paleta consistente
+# 4) CSS — tema escuro + animações + paleta consistente
 # ---------------------------------------------------------------------------
 CSS = """
-:root, .dark { color-scheme: light; }
-
+<style>
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(14px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -241,14 +218,14 @@ CSS = """
   50% { box-shadow: 0 0 22px rgba(129, 140, 248, 0.25); }
 }
 
-body, .gradio-container, .dark .gradio-container {
+.stApp {
   background: radial-gradient(circle at 15% 0%, #1e1b4b 0%, #0b1020 45%, #030712 100%) !important;
   color: #e2e8f0 !important;
 }
 #titulo { animation: fadeInUp 0.6s ease-out; text-align: center; }
-#titulo h1 { color: #c7d2fe !important; text-shadow: 0 0 24px rgba(129, 140, 248, 0.35); }
+h1 { color: #c7d2fe !important; text-shadow: 0 0 24px rgba(129, 140, 248, 0.35); }
 
-#card-form, #card-tree, .dark #card-form, .dark #card-tree {
+.card-form, .card-tree {
   animation: fadeInUp 0.7s ease-out;
   border-radius: 16px !important;
   background: #131a2c !important;
@@ -256,24 +233,24 @@ body, .gradio-container, .dark .gradio-container {
   color: #e2e8f0 !important;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
   transition: box-shadow 0.25s ease, transform 0.25s ease;
+  padding: 18px 20px;
 }
-#card-form:hover, #card-tree:hover {
+.card-form:hover, .card-tree:hover {
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
   transform: translateY(-2px);
-  animation: glow 2.4s ease-in-out infinite;
 }
-#card-form h3, #card-tree h3, .dark #card-form h3, .dark #card-tree h3 { color: #a5b4fc !important; }
-#card-form label span, .dark #card-form label span { color: #cbd5e1 !important; }
+.card-form h3, .card-tree h3 { color: #a5b4fc !important; margin-top: 0; }
 
-#botao-prever {
+div[data-testid="stButton"] > button {
   background: linear-gradient(135deg, #4338ca, #7e22ce) !important;
   border: none !important;
   color: #f8fafc !important;
   transition: transform 0.15s ease, box-shadow 0.15s ease;
   font-weight: 600 !important;
+  width: 100%;
 }
-#botao-prever:hover { transform: scale(1.03); box-shadow: 0 6px 20px rgba(126, 34, 206, 0.5); }
-#botao-prever:active { transform: scale(0.97); }
+div[data-testid="stButton"] > button:hover { transform: scale(1.03); box-shadow: 0 6px 20px rgba(126, 34, 206, 0.5); }
+div[data-testid="stButton"] > button:active { transform: scale(0.97); }
 
 .resultado-card {
   animation: popIn 0.45s ease-out;
@@ -312,48 +289,70 @@ body, .gradio-container, .dark .gradio-container {
   font-size: 13px;
 }
 #aviso-dados * { color: #fcd34d !important; }
-
-input[type="range"] { accent-color: #818cf8; }
+</style>
 """
+st.markdown(CSS, unsafe_allow_html=True)
 
-# Garante o tema escuro mesmo se o navegador do usuário estiver em modo claro
-FORCE_DARK_JS = """
-() => {
-    document.documentElement.classList.add('dark');
-}
-"""
 
 # ---------------------------------------------------------------------------
-# 6) Interface
+# 5) Interface
 # ---------------------------------------------------------------------------
-with gr.Blocks(css=CSS, theme=gr.themes.Soft(primary_hue="indigo"), js=FORCE_DARK_JS) as interface:
-    gr.Markdown("# 🎓 Previsor de Situação do Aluno", elem_id="titulo")
-    gr.Markdown(
-        f"Modelo treinado com {N_AMOSTRAS} alunos simulados a partir de uma regra "
-        f"realista (nota e faltas definem a situação). Acurácia no conjunto de "
-        f"teste: **{ACURACIA_TESTE*100:.1f}%**.",
-        elem_id="aviso-dados",
-    )
+EXEMPLOS = [
+    {"horas": 0, "faltas": 0, "nota": 0.0},
+    {"horas": 10, "faltas": 1, "nota": 9.0},
+    {"horas": 3, "faltas": 12, "nota": 4.0},
+    {"horas": 6, "faltas": 5, "nota": 6.0},
+    {"horas": 15, "faltas": 25, "nota": 8.5},
+]
 
-    with gr.Row():
-        with gr.Column(elem_id="card-form", variant="panel"):
-            gr.Markdown("### 📋 Dados do aluno")
-            horas_slider = gr.Slider(0, 20, value=6, step=1, label="Horas de estudo por semana")
-            faltas_slider = gr.Slider(0, 30, value=2, step=1, label="Número de faltas")
-            nota_slider = gr.Slider(0, 10, value=7.0, step=0.1, label="Nota")
-            botao = gr.Button("🔮 Prever situação", elem_id="botao-prever", variant="primary")
-            saida = gr.HTML()
+# Valores padrão dos sliders, controláveis via session_state (para os exemplos)
+if "horas" not in st.session_state:
+    st.session_state["horas"] = 6
+if "faltas" not in st.session_state:
+    st.session_state["faltas"] = 2
+if "nota" not in st.session_state:
+    st.session_state["nota"] = 7.0
 
-        with gr.Column(elem_id="card-tree", variant="panel"):
-            gr.Markdown("### 🌳 Árvore de decisão treinada")
-            gr.Image(value=IMG_ARVORE, show_label=False, container=False)
+st.markdown('<h1 id="titulo">🎓 Previsor de Situação do Aluno</h1>', unsafe_allow_html=True)
+st.markdown(
+    f"""<div id="aviso-dados">Modelo treinado com {N_AMOSTRAS} alunos simulados a partir de uma
+    regra realista (nota e faltas definem a situação). Acurácia no conjunto de teste:
+    <b>{ACURACIA_TESTE * 100:.1f}%</b>.</div>""",
+    unsafe_allow_html=True,
+)
+st.write("")
 
-    botao.click(fn=prever_situacao, inputs=[horas_slider, faltas_slider, nota_slider], outputs=saida)
+col_form, col_tree = st.columns(2)
 
-    gr.Examples(
-        examples=[[0, 0, 0], [10, 1, 9.0], [3, 12, 4.0], [6, 5, 6.0], [15, 25, 8.5]],
-        inputs=[horas_slider, faltas_slider, nota_slider],
-    )
+with col_form:
+    st.markdown('<div class="card-form">', unsafe_allow_html=True)
+    st.markdown("### 📋 Dados do aluno")
+    horas_in = st.slider("Horas de estudo por semana", 0, 20, step=1, key="horas")
+    faltas_in = st.slider("Número de faltas", 0, 30, step=1, key="faltas")
+    nota_in = st.slider("Nota", 0.0, 10.0, step=0.1, key="nota")
 
-if __name__ == "__main__":
-    interface.launch()
+    prever_clicado = st.button("🔮 Prever situação")
+
+    resultado_placeholder = st.empty()
+
+    if prever_clicado:
+        html_resultado = prever_situacao(horas_in, faltas_in, nota_in)
+        resultado_placeholder.markdown(html_resultado, unsafe_allow_html=True)
+
+    st.markdown("**Exemplos rápidos:**")
+    cols_exemplos = st.columns(len(EXEMPLOS))
+    for i, ex in enumerate(EXEMPLOS):
+        rotulo = f"{ex['horas']}h · {ex['faltas']}f · {ex['nota']}"
+        if cols_exemplos[i].button(rotulo, key=f"exemplo_{i}"):
+            st.session_state["horas"] = ex["horas"]
+            st.session_state["faltas"] = ex["faltas"]
+            st.session_state["nota"] = ex["nota"]
+            st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with col_tree:
+    st.markdown('<div class="card-tree">', unsafe_allow_html=True)
+    st.markdown("### 🌳 Árvore de decisão treinada")
+    st.pyplot(FIG_ARVORE, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
